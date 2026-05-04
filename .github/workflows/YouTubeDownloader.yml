@@ -26,23 +26,20 @@ on:
         type: number
         default: 90
 
+permissions:
+  contents: read
+
 jobs:
   download-and-process:
     name: 🚀 Download & Process YouTube Content
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    
-    steps:
-      - name: 📂 Clone Repository
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
+    steps:
       - name: 🔧 Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y zip curl jq
+          sudo apt-get install -y zip curl jq python3 python3-pip
+          python3 -m pip install -q requests
 
       - name: 🎯 Request Conversion via API
         id: converter
@@ -68,27 +65,18 @@ jobs:
               """Normalize and validate input quality"""
               
               if output_type == 'audio':
-                  # Remove extra characters and normalize
-                  quality = quality_input.lower().strip()
-                  # If it has 'p' (entered by mistake), remove it
-                  quality = quality.replace('p', '')
-                  # If it doesn't have 'kbps', add it
+                  quality = quality_input.lower().strip().replace('p', '')
                   if 'kbps' not in quality:
                       if quality.endswith('k'):
                           quality = quality.replace('k', 'kbps')
                       else:
-                          # If it's just a number
                           quality = quality + 'kbps'
                   
-                  # Check if valid
                   if quality in AUDIO_BITRATES:
                       return quality
                   
-                  # Find the closest quality
                   print(f"⚠️ Invalid audio quality: '{quality_input}'")
                   bitrate_num = int(''.join(filter(str.isdigit, quality)))
-                  
-                  # Find closest bitrate
                   supported_nums = [int(''.join(filter(str.isdigit, b))) for b in AUDIO_BITRATES]
                   closest = min(supported_nums, key=lambda x: abs(x - bitrate_num))
                   fallback = [b for b in AUDIO_BITRATES if str(closest) in b][0]
@@ -97,10 +85,7 @@ jobs:
                   return fallback
               
               else:  # video
-                  quality = quality_input.lower().strip()
-                  # If it has 'k' (entered by mistake for video), remove it
-                  quality = quality.replace('k', '')
-                  # If it doesn't have 'p', add it
+                  quality = quality_input.lower().strip().replace('k', '')
                   if not quality.endswith('p'):
                       quality += 'p'
                   
@@ -108,32 +93,26 @@ jobs:
                       return quality
                   
                   print(f"⚠️ Invalid video quality: '{quality_input}'")
-                  
-                  # Map invalid qualities to valid ones
                   quality_map = {
-                      '240p': '360p',   # 240p is not supported, closest is 360p
-                      '4k': '1080p',    # 4K is not supported, closest is 1080p
+                      '240p': '360p',
+                      '4k': '1080p',
                       '2160p': '1080p',
                       '1440p': '1080p',
                       '2k': '1080p',
                   }
-                  
                   if quality in quality_map:
                       fallback = quality_map[quality]
                       print(f"🔄 Mapped to closest quality: {fallback}")
                       return fallback
                   
-                  # If none matched, default to 720p
                   print("🔄 Using default: 720p")
                   return '720p'
           
-          # Apply normalization
           QUALITY = normalize_quality(OUTPUT_TYPE, QUALITY)
           
           print(f"🎯 Target: {OUTPUT_TYPE.upper()} @ {QUALITY}")
           print(f"{'='*50}")
           
-          # ========== REQUEST HEADERS ==========
           HEADERS = {
               "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
               "Accept": "application/json",
@@ -142,29 +121,20 @@ jobs:
               "Origin": "https://media.ytmp3.gg",
           }
           
-          # ========== PREPARE PAYLOAD ==========
           if OUTPUT_TYPE == 'audio':
               payload = {
                   "url": YT_URL,
                   "os": "linux",
-                  "output": {
-                      "type": "audio",
-                      "format": "mp3"
-                  },
+                  "output": {"type": "audio", "format": "mp3"},
                   "audio": {"bitrate": QUALITY}
               }
           else:
               payload = {
                   "url": YT_URL,
                   "os": "linux",
-                  "output": {
-                      "type": "video",
-                      "format": "mp4",
-                      "quality": QUALITY
-                  }
+                  "output": {"type": "video", "format": "mp4", "quality": QUALITY}
               }
           
-          # ========== INITIATE CONVERSION ==========
           print(f"📤 Requesting conversion for: {YT_URL}")
           print(f"📋 Final payload: {json.dumps(payload, indent=2)}")
           
@@ -176,8 +146,6 @@ jobs:
               
               if response.status_code != 200:
                   print(f"❌ API Error ({response.status_code}): {response.text[:200]}")
-                  
-                  # If it's 400, try once with different quality
                   if response.status_code == 400 and OUTPUT_TYPE == 'audio':
                       print("🔄 Retrying with fallback quality: 192kbps")
                       payload["audio"]["bitrate"] = "192kbps"
@@ -208,7 +176,6 @@ jobs:
           print(f"✅ Conversion registered: {title}")
           print(f"{'='*50}")
           
-          # ========== POLL FOR COMPLETION ==========
           download_url = None
           for attempt in range(MAX_ATTEMPTS):
               time.sleep(STATUS_CHECK_INTERVAL)
@@ -239,28 +206,18 @@ jobs:
               print("⏰ Timeout - conversion took too long")
               sys.exit(1)
           
-          # ========== GENERATE SAFE FILENAME ==========
-          # Extract video ID from URL
           video_id_match = re.search(r'(?:v=|\/)([a-zA-Z0-9_-]{11})', YT_URL)
           video_id = video_id_match.group(1) if video_id_match else "unknown"
           
-          # Clean up the title
           safe_title = re.sub(r'[^a-zA-Z0-9\-_]', '_', title.replace(' ', '_'))
-          # Limit filename length
           safe_title = safe_title[:60] if len(safe_title) > 60 else safe_title
           safe_title = safe_title.strip('_') or video_id
           
-          # Determine extension and quality label
-          if OUTPUT_TYPE == 'audio':
-              extension = "mp3"
-              quality_label = QUALITY  # e.g. 320kbps
-          else:
-              extension = "mp4"
-              quality_label = QUALITY  # e.g. 720p
+          extension = "mp3" if OUTPUT_TYPE == 'audio' else "mp4"
+          quality_label = QUALITY
           
           filename = f"{safe_title}_{video_id}_{quality_label}.{extension}"
           
-          # ========== SAVE METADATA ==========
           with open('/tmp/metadata.txt', 'w', encoding='utf-8') as f:
               f.write(f"{download_url}\n")
               f.write(f"{filename}\n")
@@ -319,26 +276,25 @@ jobs:
         run: |
           THRESHOLD_MB="${{ github.event.inputs.split_threshold_mb }}"
           THRESHOLD_BYTES=$((THRESHOLD_MB * 1024 * 1024))
-          
+
           process_file() {
             local file="$1"
             local size=$(stat -c%s "$file")
             local basename=$(basename "$file")
             local size_mb=$((size / 1024 / 1024))
-            
+
             if [[ $THRESHOLD_BYTES -gt 0 && $size -gt $THRESHOLD_BYTES ]]; then
               echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
               echo "✂️ Splitting $basename (${size_mb}MB)"
               echo "   Parts size: ${THRESHOLD_MB}MB each"
-              
+
               cd ./downloads
               zip -r -s "${THRESHOLD_MB}m" "${basename}.zip" "temp/${basename}"
               cd ..
-              
+
               PARTS_COUNT=$(ls ./downloads/${basename}.z* 2>/dev/null | wc -l)
               echo "✅ Created $PARTS_COUNT parts"
-              
-              # Remove original file from temp
+
               rm "$file"
             else
               if [[ $THRESHOLD_BYTES -eq 0 ]]; then
@@ -349,60 +305,20 @@ jobs:
               mv "$file" "./downloads/"
             fi
           }
-          
+
           export -f process_file
           export THRESHOLD_BYTES THRESHOLD_MB
-          
+
           find ./downloads/temp -type f -exec bash -c 'process_file "$0"' {} \;
           rm -rf ./downloads/temp
-          
+
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "📂 Final files in ./downloads/:"
           ls -lh ./downloads/ 2>/dev/null | tail -n +2 | awk '{print "  • " $NF " (" $5 ")"}'
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-      - name: 📤 Commit and Push to Repository
-        run: |
-          BRANCH="${GITHUB_REF_NAME}"
-          
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Stage all downloaded files
-          git add ./downloads/
-          
-          if git diff --staged --quiet; then
-            echo "ℹ️ No changes to commit"
-            exit 0
-          fi
-          
-          # Get list of staged files
-          mapfile -t STAGED_FILES < <(git diff --staged --name-only)
-          TOTAL_FILES=${#STAGED_FILES[@]}
-          
-          echo "📦 Found $TOTAL_FILES file(s) to upload"
-          
-          # Unstage everything first for batch processing
-          git reset HEAD ./downloads/
-          
-          BATCH_SIZE=5
-          for (( i=0; i<TOTAL_FILES; i+=BATCH_SIZE )); do
-            BATCH_NUM=$((i / BATCH_SIZE + 1))
-            END=$((i + BATCH_SIZE))
-            [[ $END -gt $TOTAL_FILES ]] && END=$TOTAL_FILES
-            
-            echo "🚀 Uploading batch $BATCH_NUM [$((i+1))–${END} of $TOTAL_FILES]"
-            
-            # Add files in current batch
-            for (( j=i; j<END; j++ )); do
-              git add "${STAGED_FILES[$j]}"
-            done
-            
-            git commit -m "chore: add YouTube content batch $BATCH_NUM [skip ci]"
-            git pull --rebase origin "$BRANCH" || true
-            git push origin "HEAD:$BRANCH"
-            
-            echo "✅ Batch $BATCH_NUM uploaded"
-          done
-          
-          echo "🎉 All files successfully uploaded to $BRANCH"
+      - name: 📦 Upload as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-download-${{ github.run_id }}
+          path: downloads/
