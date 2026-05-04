@@ -4,24 +4,24 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: '🎬 YouTube Video URL'
+        description: "🎬 YouTube Video URL"
         required: true
         type: string
       type:
-        description: '📦 Output Type'
+        description: "📦 Output Type"
         required: true
         type: choice
         options:
           - video
           - audio
-        default: 'video'
+        default: video
       quality:
-        description: '🎚️ Quality (video: 144p/360p/480p/720p/1080p | audio: 64kbps/128kbps/192kbps/320kbps)'
+        description: "🎚️ Quality (video: 144p/360p/480p/720p/1080p | audio: 64kbps/128kbps/192kbps/320kbps)"
         required: false
         type: string
-        default: '720p'
+        default: 720p
       split_threshold_mb:
-        description: '📦 Split files larger than (MB) — 0 = never'
+        description: "📦 Split files larger than (MB) — 0 = never"
         required: false
         type: number
         default: 90
@@ -33,86 +33,100 @@ jobs:
   download-and-process:
     name: 🚀 Download & Process YouTube Content
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: 🔧 Install Dependencies
+        shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y zip curl jq python3 python3-pip
           python3 -m pip install -q requests
 
       - name: 🎯 Request Conversion via API
         id: converter
+        shell: bash
+        env:
+          YT_URL: ${{ github.event.inputs.url }}
+          OUTPUT_TYPE: ${{ github.event.inputs.type }}
+          QUALITY: ${{ github.event.inputs.quality }}
         run: |
+          set -euo pipefail
           python3 << 'PYEOF'
           import os, sys, json, time, re
           import requests
-          
-          # ========== CONFIGURATION ==========
-          YT_URL = os.environ['YT_URL']
-          OUTPUT_TYPE = os.environ['OUTPUT_TYPE']
-          QUALITY = os.environ.get('QUALITY', '720p')
-          
+
+          YT_URL = os.environ["YT_URL"].strip()
+          OUTPUT_TYPE = os.environ["OUTPUT_TYPE"].strip().lower()
+          QUALITY_INPUT = os.environ.get("QUALITY", "720p").strip()
+
           API_ENDPOINT = "https://hub.ytconvert.org/api/download"
           STATUS_CHECK_INTERVAL = 2
           MAX_ATTEMPTS = 90
-          
-          # ========== SUPPORTED QUALITIES ==========
-          VIDEO_QUALITIES = ['144p', '360p', '480p', '720p', '1080p']
-          AUDIO_BITRATES = ['64kbps', '128kbps', '192kbps', '320kbps']
-          
-          def normalize_quality(output_type, quality_input):
-              """Normalize and validate input quality"""
-              
-              if output_type == 'audio':
-                  quality = quality_input.lower().strip().replace('p', '')
-                  if 'kbps' not in quality:
-                      if quality.endswith('k'):
-                          quality = quality.replace('k', 'kbps')
-                      else:
-                          quality = quality + 'kbps'
-                  
-                  if quality in AUDIO_BITRATES:
-                      return quality
-                  
-                  print(f"⚠️ Invalid audio quality: '{quality_input}'")
-                  bitrate_num = int(''.join(filter(str.isdigit, quality)))
-                  supported_nums = [int(''.join(filter(str.isdigit, b))) for b in AUDIO_BITRATES]
-                  closest = min(supported_nums, key=lambda x: abs(x - bitrate_num))
-                  fallback = [b for b in AUDIO_BITRATES if str(closest) in b][0]
-                  
-                  print(f"🔄 Using closest supported bitrate: {fallback}")
-                  return fallback
-              
-              else:  # video
-                  quality = quality_input.lower().strip().replace('k', '')
-                  if not quality.endswith('p'):
-                      quality += 'p'
-                  
-                  if quality in VIDEO_QUALITIES:
-                      return quality
-                  
-                  print(f"⚠️ Invalid video quality: '{quality_input}'")
-                  quality_map = {
-                      '240p': '360p',
-                      '4k': '1080p',
-                      '2160p': '1080p',
-                      '1440p': '1080p',
-                      '2k': '1080p',
-                  }
-                  if quality in quality_map:
-                      fallback = quality_map[quality]
-                      print(f"🔄 Mapped to closest quality: {fallback}")
-                      return fallback
-                  
-                  print("🔄 Using default: 720p")
-                  return '720p'
-          
-          QUALITY = normalize_quality(OUTPUT_TYPE, QUALITY)
-          
-          print(f"🎯 Target: {OUTPUT_TYPE.upper()} @ {QUALITY}")
-          print(f"{'='*50}")
-          
+
+          VIDEO_QUALITIES = ["144p", "360p", "480p", "720p", "1080p"]
+          AUDIO_KBPS = [64, 128, 192, 320]
+
+          def normalize_video_quality(q: str) -> str:
+              q = q.lower().strip().replace(" ", "")
+              aliases = {"4k":"1080p", "2160p":"1080p", "1440p":"1080p", "2k":"1080p", "240p":"360p"}
+              if q in aliases:
+                  return aliases[q]
+              if not q.endswith("p"):
+                  q += "p"
+              if q in VIDEO_QUALITIES:
+                  return q
+              nums = [int(x.replace("p","")) for x in VIDEO_QUALITIES]
+              n = int("".join(ch for ch in q if ch.isdigit()) or "720")
+              closest = min(nums, key=lambda x: abs(x - n))
+              return f"{closest}p"
+
+          def normalize_audio_quality(q: str):
+              q = q.lower().strip().replace(" ", "")
+              # normalize user input to kbps label for display
+              if q.endswith("k"):
+                  q = q[:-1] + "kbps"
+              if not q.endswith("kbps"):
+                  digits = "".join(ch for ch in q if ch.isdigit())
+                  q = (digits if digits else "192") + "kbps"
+
+              # parse numeric
+              try:
+                  n = int("".join(ch for ch in q if ch.isdigit()))
+              except ValueError:
+                  n = 192
+
+              closest = min(AUDIO_KBPS, key=lambda x: abs(x - n))
+              display_quality = f"{closest}kbps"   # for filename/log
+              api_bitrate = f"{closest}k"          # REQUIRED by API
+              return display_quality, api_bitrate
+
+          if OUTPUT_TYPE not in ("audio", "video"):
+              print(f"❌ Invalid output type: {OUTPUT_TYPE}")
+              sys.exit(1)
+
+          if OUTPUT_TYPE == "audio":
+              quality_label, api_bitrate = normalize_audio_quality(QUALITY_INPUT)
+              payload = {
+                  "url": YT_URL,
+                  "os": "linux",
+                  "output": {"type": "audio", "format": "mp3"},
+                  "audio": {"bitrate": api_bitrate}
+              }
+          else:
+              quality_label = normalize_video_quality(QUALITY_INPUT)
+              payload = {
+                  "url": YT_URL,
+                  "os": "linux",
+                  "output": {"type": "video", "format": "mp4", "quality": quality_label}
+              }
+
+          print(f"🎯 Target: {OUTPUT_TYPE.upper()} @ {quality_label}")
+          print("=" * 50)
+          print(f"📤 Requesting conversion for: {YT_URL}")
+          print(f"📋 Final payload: {json.dumps(payload, indent=2)}")
+
           HEADERS = {
               "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
               "Accept": "application/json",
@@ -120,135 +134,112 @@ jobs:
               "Content-Type": "application/json",
               "Origin": "https://media.ytmp3.gg",
           }
-          
-          if OUTPUT_TYPE == 'audio':
-              payload = {
-                  "url": YT_URL,
-                  "os": "linux",
-                  "output": {"type": "audio", "format": "mp3"},
-                  "audio": {"bitrate": QUALITY}
-              }
-          else:
-              payload = {
-                  "url": YT_URL,
-                  "os": "linux",
-                  "output": {"type": "video", "format": "mp4", "quality": QUALITY}
-              }
-          
-          print(f"📤 Requesting conversion for: {YT_URL}")
-          print(f"📋 Final payload: {json.dumps(payload, indent=2)}")
-          
+
           session = requests.Session()
-          session.get("https://media.ytmp3.gg/", headers=HEADERS)
-          
-          try:
-              response = session.post(API_ENDPOINT, json=payload, headers=HEADERS, timeout=30)
-              
-              if response.status_code != 200:
-                  print(f"❌ API Error ({response.status_code}): {response.text[:200]}")
-                  if response.status_code == 400 and OUTPUT_TYPE == 'audio':
-                      print("🔄 Retrying with fallback quality: 192kbps")
-                      payload["audio"]["bitrate"] = "192kbps"
-                      QUALITY = "192kbps"
-                      response = session.post(API_ENDPOINT, json=payload, headers=HEADERS, timeout=30)
-                  elif response.status_code == 400 and OUTPUT_TYPE == 'video':
-                      print("🔄 Retrying with fallback quality: 720p")
-                      payload["output"]["quality"] = "720p"
-                      QUALITY = "720p"
-                      response = session.post(API_ENDPOINT, json=payload, headers=HEADERS, timeout=30)
-                  
-                  response.raise_for_status()
-              
-              data = response.json()
-          
-          except requests.exceptions.RequestException as e:
-              print(f"❌ Request failed: {e}")
+          session.get("https://media.ytmp3.gg/", headers=HEADERS, timeout=20)
+
+          def create_job(req_payload):
+              r = session.post(API_ENDPOINT, json=req_payload, headers=HEADERS, timeout=30)
+              if r.status_code != 200:
+                  return None, r
+              return r.json(), r
+
+          data, resp = create_job(payload)
+
+          if data is None:
+              print(f"❌ API Error ({resp.status_code}): {resp.text[:300]}")
+              # strict fallback
+              if resp.status_code == 400 and OUTPUT_TYPE == "audio":
+                  print("🔄 Retrying with fallback bitrate: 192k")
+                  payload["audio"]["bitrate"] = "192k"
+                  quality_label = "192kbps"
+                  data, resp = create_job(payload)
+              elif resp.status_code == 400 and OUTPUT_TYPE == "video":
+                  print("🔄 Retrying with fallback quality: 720p")
+                  payload["output"]["quality"] = "720p"
+                  quality_label = "720p"
+                  data, resp = create_job(payload)
+
+          if data is None:
+              print(f"❌ Request failed after fallback ({resp.status_code}): {resp.text[:300]}")
               sys.exit(1)
-          
-          status_url = data.get('statusUrl')
-          title = data.get('title', 'youtube_video')
-          
+
+          status_url = data.get("statusUrl")
+          title = data.get("title", "youtube_video")
+
           if not status_url:
-              print(f"❌ API Error: No statusUrl in response")
-              print(f"Response: {json.dumps(data, indent=2)}")
+              print("❌ API response missing statusUrl")
+              print(json.dumps(data, indent=2))
               sys.exit(1)
-          
+
           print(f"✅ Conversion registered: {title}")
-          print(f"{'='*50}")
-          
+          print("=" * 50)
+
           download_url = None
-          for attempt in range(MAX_ATTEMPTS):
+          for attempt in range(1, MAX_ATTEMPTS + 1):
               time.sleep(STATUS_CHECK_INTERVAL)
-              print(f"🔄 Checking status [{attempt + 1}/{MAX_ATTEMPTS}]...")
-              
               try:
-                  status_resp = session.get(status_url, headers=HEADERS, timeout=15)
-                  status_data = status_resp.json()
+                  sr = session.get(status_url, headers=HEADERS, timeout=15)
+                  sd = sr.json()
               except Exception as e:
-                  print(f"⚠️ Status check failed: {e}")
+                  print(f"⚠️ Status check failed [{attempt}/{MAX_ATTEMPTS}]: {e}")
                   continue
-              
-              status = status_data.get('status')
-              progress = status_data.get('progress', 0)
-              print(f"   Status: {status} | Progress: {progress}%")
-              
-              if status == 'completed':
-                  download_url = status_data.get('downloadUrl')
+
+              status = sd.get("status")
+              progress = sd.get("progress", 0)
+              print(f"🔄 Status [{attempt}/{MAX_ATTEMPTS}] => {status} ({progress}%)")
+
+              if status == "completed":
+                  download_url = sd.get("downloadUrl")
                   if download_url:
-                      print("🎉 Conversion completed successfully!")
+                      print("🎉 Conversion completed!")
                       break
-              elif status == 'failed':
-                  print("❌ Conversion failed!")
-                  print(f"   Error details: {status_data.get('error', 'Unknown error')}")
+              elif status == "failed":
+                  print(f"❌ Conversion failed: {sd.get('error', 'Unknown error')}")
                   sys.exit(1)
-          
+
           if not download_url:
-              print("⏰ Timeout - conversion took too long")
+              print("⏰ Timeout waiting for conversion completion")
               sys.exit(1)
-          
-          video_id_match = re.search(r'(?:v=|\/)([a-zA-Z0-9_-]{11})', YT_URL)
-          video_id = video_id_match.group(1) if video_id_match else "unknown"
-          
-          safe_title = re.sub(r'[^a-zA-Z0-9\-_]', '_', title.replace(' ', '_'))
-          safe_title = safe_title[:60] if len(safe_title) > 60 else safe_title
-          safe_title = safe_title.strip('_') or video_id
-          
-          extension = "mp3" if OUTPUT_TYPE == 'audio' else "mp4"
-          quality_label = QUALITY
-          
-          filename = f"{safe_title}_{video_id}_{quality_label}.{extension}"
-          
-          with open('/tmp/metadata.txt', 'w', encoding='utf-8') as f:
-              f.write(f"{download_url}\n")
-              f.write(f"{filename}\n")
-              f.write(f"{safe_title}\n")
-              f.write(f"{OUTPUT_TYPE}\n")
-              f.write(f"{QUALITY}\n")
-          
-          print(f"{'='*50}")
+
+          vid_match = re.search(r"(?:v=|/)([a-zA-Z0-9_-]{11})", YT_URL)
+          video_id = vid_match.group(1) if vid_match else "unknown"
+
+          safe_title = re.sub(r"[^a-zA-Z0-9\\-_]", "_", title.replace(" ", "_")).strip("_")
+          safe_title = safe_title[:60] if safe_title else video_id
+
+          ext = "mp3" if OUTPUT_TYPE == "audio" else "mp4"
+          filename = f"{safe_title}_{video_id}_{quality_label}.{ext}"
+
+          with open("/tmp/metadata.txt", "w", encoding="utf-8") as f:
+              f.write(download_url + "\n")
+              f.write(filename + "\n")
+              f.write(safe_title + "\n")
+              f.write(OUTPUT_TYPE + "\n")
+              f.write(quality_label + "\n")
+
+          print("=" * 50)
           print(f"📥 Download URL: {download_url[:80]}...")
           print(f"📄 Filename: {filename}")
-          print(f"🎵 Type: {OUTPUT_TYPE} | Quality: {QUALITY}")
-          print(f"{'='*50}")
+          print(f"🎵 Type: {OUTPUT_TYPE} | Quality: {quality_label}")
+          print("=" * 50)
           PYEOF
-        env:
-          YT_URL: ${{ github.event.inputs.url }}
-          OUTPUT_TYPE: ${{ github.event.inputs.type }}
-          QUALITY: ${{ github.event.inputs.quality }}
 
       - name: ⬇️ Download Converted File
+        shell: bash
         run: |
-          DOWNLOAD_URL=$(sed -n '1p' /tmp/metadata.txt)
-          FILENAME=$(sed -n '2p' /tmp/metadata.txt)
-          OUTPUT_TYPE=$(sed -n '4p' /tmp/metadata.txt)
-          QUALITY=$(sed -n '5p' /tmp/metadata.txt)
-          
+          set -euo pipefail
+          DOWNLOAD_URL="$(sed -n '1p' /tmp/metadata.txt)"
+          FILENAME="$(sed -n '2p' /tmp/metadata.txt)"
+          OUTPUT_TYPE="$(sed -n '4p' /tmp/metadata.txt)"
+          QUALITY="$(sed -n '5p' /tmp/metadata.txt)"
+
           mkdir -p ./downloads/temp
-          
+
           echo "⬇️ Downloading $OUTPUT_TYPE @ $QUALITY..."
           echo "📄 File: $FILENAME"
-          
-          curl --progress-bar \
+
+          curl --fail --show-error --progress-bar \
             -L \
             -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0" \
             -H "Referer: https://media.ytmp3.gg/" \
@@ -257,15 +248,15 @@ jobs:
             --retry 3 \
             --retry-delay 5 \
             "$DOWNLOAD_URL"
-          
-          if [ ! -f "./downloads/temp/$FILENAME" ]; then
-            echo "❌ Download failed!"
+
+          if [ ! -s "./downloads/temp/$FILENAME" ]; then
+            echo "❌ Download failed or empty file!"
             exit 1
           fi
-          
+
           FILE_SIZE=$(stat -c%s "./downloads/temp/$FILENAME")
           FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
-          
+
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "✅ Downloaded: $FILENAME"
           echo "📏 Size: ${FILE_SIZE_MB} MB"
@@ -273,48 +264,64 @@ jobs:
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
       - name: ✂️ Smart Split Large Files
+        shell: bash
         run: |
+          set -euo pipefail
+
           THRESHOLD_MB="${{ github.event.inputs.split_threshold_mb }}"
+          THRESHOLD_MB="${THRESHOLD_MB:-90}"
+
+          # sanitize numeric
+          if ! [[ "$THRESHOLD_MB" =~ ^[0-9]+$ ]]; then
+            echo "⚠️ Invalid split_threshold_mb: $THRESHOLD_MB, using 90"
+            THRESHOLD_MB=90
+          fi
+
           THRESHOLD_BYTES=$((THRESHOLD_MB * 1024 * 1024))
+          mkdir -p ./downloads
 
-          process_file() {
-            local file="$1"
-            local size=$(stat -c%s "$file")
-            local basename=$(basename "$file")
-            local size_mb=$((size / 1024 / 1024))
+          shopt -s nullglob
+          files=(./downloads/temp/*)
 
-            if [[ $THRESHOLD_BYTES -gt 0 && $size -gt $THRESHOLD_BYTES ]]; then
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "❌ No files found in ./downloads/temp"
+            exit 1
+          fi
+
+          for file in "${files[@]}"; do
+            [ -f "$file" ] || continue
+            size=$(stat -c%s "$file")
+            basename=$(basename "$file")
+            size_mb=$((size / 1024 / 1024))
+
+            if [[ "$THRESHOLD_BYTES" -gt 0 && "$size" -gt "$THRESHOLD_BYTES" ]]; then
               echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
               echo "✂️ Splitting $basename (${size_mb}MB)"
               echo "   Parts size: ${THRESHOLD_MB}MB each"
 
-              cd ./downloads
-              zip -r -s "${THRESHOLD_MB}m" "${basename}.zip" "temp/${basename}"
-              cd ..
+              (
+                cd ./downloads
+                zip -r -s "${THRESHOLD_MB}m" "${basename}.zip" "temp/${basename}"
+              )
 
-              PARTS_COUNT=$(ls ./downloads/${basename}.z* 2>/dev/null | wc -l)
-              echo "✅ Created $PARTS_COUNT parts"
-
-              rm "$file"
+              parts_count=$(ls ./downloads/"${basename}".z* 2>/dev/null | wc -l || true)
+              echo "✅ Created $parts_count parts"
+              rm -f "$file"
             else
-              if [[ $THRESHOLD_BYTES -eq 0 ]]; then
+              if [[ "$THRESHOLD_BYTES" -eq 0 ]]; then
                 echo "📁 $basename (${size_mb}MB) — split disabled"
               else
                 echo "📁 $basename (${size_mb}MB) — under threshold"
               fi
-              mv "$file" "./downloads/"
+              mv "$file" "./downloads/$basename"
             fi
-          }
+          done
 
-          export -f process_file
-          export THRESHOLD_BYTES THRESHOLD_MB
-
-          find ./downloads/temp -type f -exec bash -c 'process_file "$0"' {} \;
           rm -rf ./downloads/temp
 
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "📂 Final files in ./downloads/:"
-          ls -lh ./downloads/ 2>/dev/null | tail -n +2 | awk '{print "  • " $NF " (" $5 ")"}'
+          ls -lh ./downloads/ | tail -n +2 | awk '{print "  • " $NF " (" $5 ")"}'
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
       - name: 📦 Upload as Artifact
@@ -322,3 +329,5 @@ jobs:
         with:
           name: youtube-download-${{ github.run_id }}
           path: downloads/
+          if-no-files-found: error
+          retention-days: 7
